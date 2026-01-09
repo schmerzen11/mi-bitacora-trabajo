@@ -42,16 +42,8 @@ def guardar_en_drive(imagen_bytes, nombre_archivo):
     service = build('drive', 'v3', credentials=creds)
     
     # 1. Buscar el ID de la carpeta
-    results = service.files().list(
-        q="name = 'FOTOS_BITACORA' and mimeType = 'application/vnd.google-apps.folder'",
-        fields="files(id, name)").execute()
-    items = results.get('files', [])
     
-    if not items:
-        st.error("⚠️ No encuentro la carpeta 'FOTOS_BITACORA' en Drive. ¿La compartiste con el robot?")
-        return None
-    
-    folder_id = items[0]['id']
+    folder_id = '1Tjfn-lrjI338bBmfKHvQdnttu6JtRsfA'
     
     # 2. Subir el archivo
     file_metadata = {'name': nombre_archivo, 'parents': [folder_id]}
@@ -164,3 +156,4 @@ with tab_historial:
                     st.markdown(f"[📷 Ver foto en Drive]({ruta})")
     else:
         st.info("No hay registros en la hoja 'DB_BITACORA'.")
+
