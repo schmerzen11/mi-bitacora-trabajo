@@ -1,27 +1,44 @@
 import streamlit as st
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
+from google.oauth2.service_account import Credentials
 import gspread
+import io
+import json
 from datetime import datetime
+from PIL import Image
 
-# --- CONFIGURACIÓN ---
+# --- CONFIGURACIÓN GLOBAL ---
 ID_CARPETA_DRIVE = '1Tjfn-lrjI338bBmfKHvQdnttu6JtRsfA'
 NOMBRE_EXCEL = "DB_BITACORA"
 
-def guardar_en_drive(imagen_bytes, nombre_archivo):
-    """Sube la imagen a la carpeta específica de Google Drive."""
-    try:
-        creds = obtener_credenciales() # Usa tu función existente
-        service = build('drive', 'v3', credentials=creds)
+# --- CONEXIÓN CON GOOGLE ---
+def obtener_credenciales():
+    """Lee el secreto desde la configuración de Streamlit"""
+    if "gcp_service_account" in st.secrets:
+        try:
+            info_dict = json.loads(st.secrets["gcp_service_account"]["payload"])
+            scope = [
+                "https://www.googleapis.com/auth/spreadsheets",
+                "https://www.googleapis.com/auth/drive"
+            ]
+            return Credentials.from_service_account_info(info_dict, scopes=scope)
+        except Exception as e:
+            st.error(f"Error leyendo secretos: {e}")
+            return None
+    return None
 
-        file_metadata = {
-            'name': nombre_archivo,
-            'parents': [ID_CARPETA_DRIVE]
-        }
+def guardar_en_drive(imagen_bytes, nombre_archivo):
+    """Sube la imagen a la carpeta de Google Drive."""
+    try:
+        creds = obtener_credenciales()
+        if not creds: return None
         
+        service = build('drive', 'v3', credentials=creds)
+        file_metadata = {'name': nombre_archivo, 'parents': [ID_CARPETA_DRIVE]}
         media = MediaIoBaseUpload(imagen_bytes, mimetype='image/jpeg')
         
-        # supportsAllDrives=True es clave para evitar el error de cuota del robot
+        # supportsAllDrives=True soluciona el error de quota del robot
         file = service.files().create(
             body=file_metadata,
             media_body=media,
@@ -30,56 +47,58 @@ def guardar_en_drive(imagen_bytes, nombre_archivo):
         ).execute()
 
         return f"https://drive.google.com/file/d/{file.get('id')}/view"
-    
     except Exception as e:
-        st.error(f"❌ Error al subir a Drive: {e}")
+        st.error(f"❌ Error Drive: {e}")
         return None
 
 def guardar_en_sheets(fecha, hora, actividad, link_imagen):
-    """Registra los datos y el link de la foto en el Google Sheet."""
+    """Guarda una nueva fila en el Google Sheet."""
     try:
-        creds = obtener_credenciales() # Usa tu función existente
+        creds = obtener_credenciales()
+        if not creds: return False
+        
         client = gspread.authorize(creds)
         sheet = client.open(NOMBRE_EXCEL).sheet1
-
-        # Preparamos la fila
-        nueva_fila = [str(fecha), str(hora), actividad, link_imagen]
         
-        # Insertamos al final
-        sheet.append_row(nueva_fila)
+        fila = [str(fecha), str(hora), actividad, link_imagen]
+        sheet.append_row(fila)
         return True
-
     except Exception as e:
-        st.error(f"❌ Error al guardar en Sheets: {e}")
+        st.error(f"❌ Error Sheets: {e}")
         return False
 
-# --- BLOQUE PRINCIPAL (Lo que va en el botón de Guardar) ---
-# Sustituye la lógica de tu botón con esto:
+# --- INTERFAZ DE USUARIO ---
+st.title("🗒️ Bitácora de Trabajo")
+
+actividad = st.text_area("Descripción de la actividad:")
+foto = st.camera_input("Capturar evidencia")
 
 if st.button("🚀 Guardar en Google Drive"):
-    if actividad_input: # Asegúrate de que el usuario escribió algo
-        with st.spinner("Subiendo evidencia y registrando datos..."):
-            
-            link_foto = "Sin evidencia"
+    if actividad:
+        with st.spinner("Procesando..."):
             fecha_hoy = datetime.now().strftime("%Y-%m-%d")
             hora_hoy = datetime.now().strftime("%H:%M:%S")
+            link_foto = "Sin evidencia"
 
-            # 1. Procesar Imagen (si existe)
-            if foto_input: # Cambia por el nombre de tu variable de st.camera_input o file_uploader
-                img_byte_arr = io.BytesIO()
-                # ... (aquí va tu lógica de procesar la imagen con PIL) ...
-                nombre_img = f"evidencia_{fecha_hoy}_{hora_hoy}.jpg"
+            if foto:
+                # Procesar imagen
+                image = Image.open(foto)
+                if image.mode in ("RGBA", "P"):
+                    image = image.convert("RGB")
                 
+                img_byte_arr = io.BytesIO()
+                image.save(img_byte_arr, format='JPEG')
+                img_byte_arr.seek(0)
+                
+                nombre_img = f"evidencia_{fecha_hoy}_{hora_hoy}.jpg"
                 res_drive = guardar_en_drive(img_byte_arr, nombre_img)
                 if res_drive:
                     link_foto = res_drive
 
-            # 2. Guardar en Sheets
-            exito = guardar_en_sheets(fecha_hoy, hora_hoy, actividad_input, link_foto)
-            
-            if exito:
-                st.success("✅ ¡Todo guardado con éxito!")
+            # Guardar en Sheets
+            if guardar_en_sheets(fecha_hoy, hora_hoy, actividad, link_foto):
+                st.success("✅ ¡Actividad registrada con éxito!")
             else:
-                st.error("⚠️ La foto se subió, pero no se pudo registrar en el Excel.")
+                st.error("Hubo un problema al registrar en el Excel.")
     else:
-        st.warning("Escribe una actividad antes de guardar.")
+        st.warning("Por favor escribe una actividad.")
