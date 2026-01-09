@@ -10,126 +10,103 @@ from datetime import datetime
 from PIL import Image
 from docx import Document
 
-# --- 1. CONFIGURACIÓN INICIAL ---
-st.set_page_config(page_title="Bitácora de Trabajo", page_icon="📝", layout="wide")
+# --- 1. CONFIGURACIÓN ---
+st.set_page_config(page_title="Bitácora de Trabajo", layout="wide")
 
-# Datos confirmados en capturas previas
+# ID de carpeta y Excel confirmados en tus imágenes
 ID_CARPETA_DRIVE = '1Tjfn-lrjI338bBmfKHvQdnttu6JtRsfA'
 NOMBRE_EXCEL = "DB_BITACORA"
 
-# --- 2. FUNCIONES DE CONEXIÓN ---
 def obtener_credenciales():
-    """Obtiene credenciales desde los secretos de Streamlit Cloud."""
     if "gcp_service_account" in st.secrets:
         info_dict = json.loads(st.secrets["gcp_service_account"]["payload"])
-        scopes = [
-            "https://www.googleapis.com/auth/spreadsheets",
-            "https://www.googleapis.com/auth/drive"
-        ]
+        scopes = ["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
         return Credentials.from_service_account_info(info_dict, scopes=scopes)
     return None
 
-def guardar_evidencia_drive(imagen_bytes, nombre_archivo):
-    """Sube la imagen a Drive. Maneja el error de cuota 403."""
+def guardar_evidencia(imagen_bytes, nombre_archivo):
+    """Intenta subir la foto. Si falla por cuota, devuelve un mensaje de error en lugar de romper la app."""
     try:
         creds = obtener_credenciales()
         service = build('drive', 'v3', credentials=creds)
-        
         file_metadata = {'name': nombre_archivo, 'parents': [ID_CARPETA_DRIVE]}
-        media = MediaIoBaseUpload(imagen_bytes, mimetype='image/jpeg', resumable=True)
+        media = MediaIoBaseUpload(imagen_bytes, mimetype='image/jpeg')
         
-        # supportsAllDrives intenta usar la cuota de la carpeta compartida
+        # Intentamos la subida con soporte para drives compartidos
         file = service.files().create(
             body=file_metadata,
             media_body=media,
             fields='id',
             supportsAllDrives=True 
         ).execute()
-        
         return f"https://drive.google.com/file/d/{file.get('id')}/view"
     except Exception as e:
-        # Si hay error de cuota, mostramos aviso pero no bloqueamos el registro
-        st.warning(f"⚠️ La foto no se subió por límites de espacio del robot (Cuota). Error: {e}")
-        return "Pendiente de subida manual (Error Cuota)"
+        # Aquí rompemos el bucle: si falla la cuota, avisamos pero NO detenemos el proceso
+        st.warning(f"⚠️ La foto no se subió (Límite de Google: {e}). Se guardará solo el texto.")
+        return "Foto no disponible (Error de Cuota)"
 
-# --- 3. INTERFAZ: TABS PARA ORGANIZACIÓN ---
+# --- 2. INTERFAZ ---
 st.title("🗒️ Bitácora de Trabajo")
-tab_registro, tab_reportes = st.tabs(["✍️ Registro", "📊 Historial y Reportes"])
+tab1, tab2 = st.tabs(["✍️ Registro", "📊 Historial y Reportes"])
 
-# --- TAB DE REGISTRO ---
-with tab_registro:
-    with st.form("form_registro", clear_on_submit=True):
-        col_desc, col_file = st.columns([2, 1])
-        with col_desc:
-            descripcion = st.text_area("Descripción de la actividad:")
-        with col_file:
-            # st.file_uploader NO abre la cámara automáticamente
-            archivo = st.file_uploader("Evidencia (Foto)", type=['jpg', 'jpeg', 'png'])
-        
-        btn_enviar = st.form_submit_button("🚀 Guardar Actividad")
+with tab1:
+    with st.form("registro_form", clear_on_submit=True):
+        descripcion = st.text_area("Descripción de la actividad:")
+        # File uploader evita que la cámara se abra sola
+        archivo = st.file_uploader("Adjuntar foto (opcional)", type=['jpg', 'jpeg', 'png'])
+        enviar = st.form_submit_button("🚀 Guardar Actividad")
 
-    if btn_enviar:
+    if enviar:
         if descripcion:
-            with st.spinner("Guardando..."):
+            with st.spinner("Guardando registro..."):
                 ahora = datetime.now()
-                fecha_s = ahora.strftime("%d/%m/%Y")
-                hora_s = ahora.strftime("%H:%M:%S")
-                link_evidencia = "Sin evidencia"
-
+                f_s, h_s = ahora.strftime("%d/%m/%Y"), ahora.strftime("%H:%M:%S")
+                link_drive = "Sin evidencia"
+                
                 if archivo:
-                    # Procesar imagen con PIL para compatibilidad
-                    img = Image.open(archivo)
-                    if img.mode in ("RGBA", "P"): img = img.convert("RGB")
+                    img = Image.open(archivo).convert("RGB")
                     buf = io.BytesIO()
                     img.save(buf, format='JPEG')
                     buf.seek(0)
-                    
-                    nombre_img = f"evid_{ahora.strftime('%Y%m%d_%H%M%S')}.jpg"
-                    res_drive = guardar_evidencia_drive(buf, nombre_img)
-                    if res_drive: link_evidencia = res_drive
+                    link_drive = guardar_evidencia(buf, f"evid_{ahora.strftime('%Y%m%d_%H%M%S')}.jpg")
 
-                # Guardar en Google Sheets
+                # Guardar en Sheets (Esto siempre debería funcionar si compartiste el Excel)
                 try:
                     creds = obtener_credenciales()
                     client = gspread.authorize(creds)
                     sheet = client.open(NOMBRE_EXCEL).sheet1
-                    sheet.append_row([fecha_s, hora_s, descripcion, link_evidencia])
-                    st.success("✅ Registro guardado exitosamente.")
+                    sheet.append_row([f_s, h_s, descripcion, link_drive])
+                    st.success("✅ Registro completado.")
                 except Exception as e:
-                    st.error(f"Error Sheets: {e}")
-        else:
-            st.warning("Escribe una descripción.")
+                    st.error(f"Error en Sheets: {e}")
 
-# --- TAB DE REPORTES Y CALENDARIO ---
-with tab_reportes:
-    st.subheader("Consultar Registros")
-    # Calendario para filtrar
-    fecha_filtro = st.date_input("Filtrar por fecha:", datetime.now())
+with tab2:
+    st.subheader("Consultar por Calendario")
+    fecha_sel = st.date_input("Selecciona el día:", datetime.now())
     
-    if st.button("🔍 Ver Actividades"):
+    if st.button("🔍 Ver Datos"):
         try:
             creds = obtener_credenciales()
             client = gspread.authorize(creds)
-            data = client.open(NOMBRE_EXCEL).sheet1.get_all_records()
-            df = pd.DataFrame(data)
+            df = pd.DataFrame(client.open(NOMBRE_EXCEL).sheet1.get_all_records())
             
-            f_str = fecha_filtro.strftime("%d/%m/%Y")
-            df_dia = df[df['Fecha'] == f_str]
-
-            if not df_dia.empty:
-                st.dataframe(df_dia, use_container_width=True)
+            f_buscada = fecha_sel.strftime("%d/%m/%Y")
+            filtro = df[df['Fecha'] == f_buscada]
+            
+            if not filtro.empty:
+                st.dataframe(filtro, use_container_width=True)
                 
-                # Generación de Reporte Word
+                # Generar Word
                 doc = Document()
-                doc.add_heading(f'Bitácora - {f_str}', 0)
-                for _, fila in df_dia.iterrows():
+                doc.add_heading(f'Reporte - {f_buscada}', 0)
+                for _, fila in filtro.iterrows():
                     doc.add_paragraph(f"Hora: {fila['Hora']}\nActividad: {fila['Descripción']}\nLink: {fila['Link']}\n" + "-"*20)
                 
-                b_word = io.BytesIO()
-                doc.save(b_word)
-                b_word.seek(0)
-                st.download_button("📄 Descargar Reporte Word", b_word, f"Reporte_{f_str.replace('/','-')}.docx")
+                buf_word = io.BytesIO()
+                doc.save(buf_word)
+                buf_word.seek(0)
+                st.download_button("📥 Descargar Word", buf_word, f"reporte_{f_buscada}.docx")
             else:
-                st.info(f"No hay registros para el día {f_str}.")
+                st.info("No hay registros para este día.")
         except Exception as e:
-            st.error(f"Error al cargar datos: {e}")
+            st.error(f"Error al cargar historial: {e}")
