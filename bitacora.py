@@ -1,214 +1,166 @@
 import streamlit as st
 import pandas as pd
 from datetime import datetime, date
-import os
-from PIL import Image
-import calendar
 import io
-from docx import Document
-from docx.shared import Inches
+import json
+from PIL import Image
 
-# --- Configuración de la página ---
-st.set_page_config(page_title="Bitácora Servicios", page_icon="📝", layout="centered")
+# --- LIBRERÍAS DE GOOGLE ---
+try:
+    import gspread
+    from google.oauth2.service_account import Credentials
+    from googleapiclient.discovery import build
+    from googleapiclient.http import MediaIoBaseUpload
+except ImportError:
+    pass
 
-# --- Configuración de Carpetas ---
-CARPETA_DATOS = "datos_bitacora"
-CARPETA_IMAGENES = os.path.join(CARPETA_DATOS, "evidencias")
-ARCHIVO_CSV = os.path.join(CARPETA_DATOS, "registro_actividades.csv")
+# --- Configuración ---
+st.set_page_config(page_title="Bitácora Servicios", page_icon="☁️", layout="centered")
 
-os.makedirs(CARPETA_IMAGENES, exist_ok=True)
-
-# --- Funciones de soporte ---
-def cargar_datos():
-    if os.path.exists(ARCHIVO_CSV):
+# --- CONEXIÓN CON GOOGLE ---
+def obtener_credenciales():
+    # Leemos el secreto desde la configuración de Streamlit
+    if "gcp_service_account" in st.secrets:
         try:
-            df = pd.read_csv(ARCHIVO_CSV)
-            df['Fecha'] = pd.to_datetime(df['Fecha']).dt.date
-            return df
-        except:
-            return pd.DataFrame(columns=["Fecha", "Hora", "Actividad", "RutaImagen"])
-    else:
-        return pd.DataFrame(columns=["Fecha", "Hora", "Actividad", "RutaImagen"])
-
-def guardar_registro(fecha, hora, actividad, imagen_upload):
-    ruta_imagen_final = None
-    
-    if imagen_upload is not None:
-        timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
-        nombre_imagen = f"evidencia_{timestamp_str}.jpg"
-        ruta_imagen_final = os.path.join(CARPETA_IMAGENES, nombre_imagen)
-        
-        try:
-            img = Image.open(imagen_upload)
-            img.thumbnail((1000, 1000)) 
-            img.save(ruta_imagen_final, quality=85, optimize=True)
+            info_dict = json.loads(st.secrets["gcp_service_account"]["payload"])
+            scope = [
+                "https://www.googleapis.com/auth/spreadsheets",
+                "https://www.googleapis.com/auth/drive"
+            ]
+            creds = Credentials.from_service_account_info(info_dict, scopes=scope)
+            return creds
         except Exception as e:
-            st.error(f"Error al guardar imagen: {e}")
+            st.error(f"Error leyendo secretos: {e}")
+            return None
+    return None
 
-    df = cargar_datos()
-    nuevo_registro = pd.DataFrame({
-        "Fecha": [fecha],
-        "Hora": [hora],
-        "Actividad": [actividad],
-        "RutaImagen": [ruta_imagen_final if ruta_imagen_final else "Sin evidencia"]
-    })
+def guardar_en_drive(imagen_bytes, nombre_archivo):
+    """Sube la imagen a la carpeta FOTOS_BITACORA en Drive"""
+    creds = obtener_credenciales()
+    if not creds: return None
     
-    df = pd.concat([df, nuevo_registro], ignore_index=True)
-    df.to_csv(ARCHIVO_CSV, index=False)
-    return True
-
-def obtener_calendario_dataframe(anio, mes, dias_registrados):
-    cal = calendar.monthcalendar(anio, mes)
-    cal_visual = []
-    for semana in cal:
-        semana_visual = []
-        for dia in semana:
-            if dia == 0:
-                semana_visual.append("") 
-            else:
-                fecha_actual = date(anio, mes, dia)
-                if fecha_actual in dias_registrados:
-                    semana_visual.append(f"{dia} ✅")
-                else:
-                    semana_visual.append(f"{dia}")
-        cal_visual.append(semana_visual)
-    return pd.DataFrame(cal_visual, columns=["Lun", "Mar", "Mié", "Jue", "Vie", "Sáb", "Dom"])
-
-def generar_word(df_filtrado, mes_nombre, anio):
-    """Genera un archivo Word en memoria con los datos filtrados"""
-    doc = Document()
+    service = build('drive', 'v3', credentials=creds)
     
-    # Título del documento
-    doc.add_heading(f'Informe de Actividades - {mes_nombre} {anio}', 0)
-    doc.add_paragraph(f'Generado el: {datetime.now().strftime("%d/%m/%Y")}')
+    # 1. Buscar el ID de la carpeta
+    results = service.files().list(
+        q="name = 'FOTOS_BITACORA' and mimeType = 'application/vnd.google-apps.folder'",
+        fields="files(id, name)").execute()
+    items = results.get('files', [])
     
-    # Iterar sobre las filas (ordenadas por fecha)
-    # Primero las ordenamos por fecha ascendente para el reporte
-    df_reporte = df_filtrado.sort_values(by=["Fecha", "Hora"])
+    if not items:
+        st.error("⚠️ No encuentro la carpeta 'FOTOS_BITACORA' en Drive. ¿La compartiste con el robot?")
+        return None
     
-    for index, row in df_reporte.iterrows():
-        fecha_fmt = row['Fecha'].strftime('%d/%m/%Y')
-        # Encabezado por cada actividad
-        doc.add_heading(f"{fecha_fmt} - {row['Hora']}", level=2)
-        
-        # Descripción
-        p = doc.add_paragraph()
-        runner = p.add_run("Descripción: ")
-        runner.bold = True
-        p.add_run(row['Actividad'])
-        
-        # Imagen
-        ruta_img = row['RutaImagen']
-        if ruta_img and ruta_img != "Sin evidencia" and os.path.exists(ruta_img):
-            try:
-                doc.add_paragraph("Evidencia fotográfica:")
-                # Insertar imagen con ancho de 4 pulgadas (para que quepa bien)
-                doc.add_picture(ruta_img, width=Inches(4))
-            except Exception as e:
-                doc.add_paragraph(f"[No se pudo cargar la imagen: {e}]")
-        
-        doc.add_paragraph("-" * 50) # Separador
+    folder_id = items[0]['id']
+    
+    # 2. Subir el archivo
+    file_metadata = {'name': nombre_archivo, 'parents': [folder_id]}
+    media = MediaIoBaseUpload(imagen_bytes, mimetype='image/jpeg')
+    file = service.files().create(body=file_metadata, media_body=media, fields='id').execute()
+    
+    # Retornamos un enlace para ver la imagen
+    return f"https://drive.google.com/file/d/{file.get('id')}/view"
 
-    # Guardar en memoria (buffer) en lugar de disco
-    buffer = io.BytesIO()
-    doc.save(buffer)
-    buffer.seek(0)
-    return buffer
-
-# --- Interfaz Gráfica ---
-
-st.title("🛠️ Bitácora de Servicios")
-
-tab_registro, tab_calendario, tab_historial = st.tabs(["📝 Nuevo Registro", "📅 Vista Calendario", "📋 Historial y Reporte"])
-
-df = cargar_datos()
-
-# ================= PESTAÑA 1: REGISTRO =================
-with tab_registro:
-    st.markdown("##### Ingresar Actividad")
-    with st.form("formulario_bitacora", clear_on_submit=True):
-        col1, col2 = st.columns(2)
-        with col1:
-            fecha_input = st.date_input("Fecha", date.today())
-        with col2:
-            hora_input = st.time_input("Hora", datetime.now().time())
-            
-        actividad_input = st.text_area("Descripción", height=100)
-        imagen_input = st.file_uploader("Evidencia", type=['jpg', 'png', 'jpeg'], label_visibility="collapsed")
-        
-        submitted = st.form_submit_button("💾 Guardar", type="primary", use_container_width=True)
-        
-        if submitted:
-            if actividad_input.strip() == "":
-                st.error("⚠️ Falta descripción.")
-            else:
-                guardar_registro(fecha_input, hora_input.strftime("%H:%M"), actividad_input, imagen_input)
-                st.success("✅ Guardado")
-                st.rerun()
-
-# ================= PESTAÑA 2: CALENDARIO =================
-with tab_calendario:
-    st.subheader("Mapa de cumplimiento")
-    col_a, col_b = st.columns(2)
-    with col_a:
-        anio_ver = st.number_input("Año", value=date.today().year, step=1)
-    with col_b:
-        mes_ver = st.selectbox("Mes", range(1, 13), index=date.today().month - 1)
-
-    if not df.empty:
-        fechas_registradas = set(df['Fecha'].tolist())
-    else:
-        fechas_registradas = set()
-
+def guardar_en_sheets(fecha, hora, actividad, link_imagen):
+    """Guarda una nueva fila en DB_BITACORA"""
+    creds = obtener_credenciales()
+    if not creds: return False
+    
+    client = gspread.authorize(creds)
+    
     try:
-        st.markdown(f"**{calendar.month_name[mes_ver]} {anio_ver}**")
-        df_cal = obtener_calendario_dataframe(anio_ver, mes_ver, fechas_registradas)
-        st.dataframe(df_cal, use_container_width=True, height=300)
-    except:
-        pass
+        sheet = client.open("DB_BITACORA").sheet1
+        # Si está vacía, ponemos encabezados
+        if not sheet.get_all_values():
+            sheet.append_row(["Fecha", "Hora", "Actividad", "RutaImagen"])
+            
+        sheet.append_row([str(fecha), str(hora), actividad, link_imagen])
+        return True
+    except Exception as e:
+        st.error(f"Error accediendo a Google Sheets: {e}")
+        return False
 
-# ================= PESTAÑA 3: HISTORIAL Y REPORTE =================
-with tab_historial:
-    st.subheader("Generar Informe Mensual")
+def leer_de_sheets():
+    """Lee los datos para el historial"""
+    creds = obtener_credenciales()
+    if not creds: return pd.DataFrame()
     
-    if df.empty:
-        st.info("No hay datos para generar reportes.")
-    else:
-        # Filtros para el reporte
-        col_rep1, col_rep2 = st.columns(2)
-        with col_rep1:
-            rep_anio = st.number_input("Año Reporte", value=date.today().year, key="rep_anio")
-        with col_rep2:
-            nombre_meses = {1: "Enero", 2: "Febrero", 3: "Marzo", 4: "Abril", 5: "Mayo", 6: "Junio", 
-                            7: "Julio", 8: "Agosto", 9: "Septiembre", 10: "Octubre", 11: "Noviembre", 12: "Diciembre"}
-            rep_mes_nombre = st.selectbox("Mes Reporte", list(nombre_meses.values()), index=date.today().month - 1)
-            # Obtener numero de mes
-            rep_mes_num = [k for k, v in nombre_meses.items() if v == rep_mes_nombre][0]
+    client = gspread.authorize(creds)
+    try:
+        sheet = client.open("DB_BITACORA").sheet1
+        data = sheet.get_all_records()
+        return pd.DataFrame(data)
+    except:
+        return pd.DataFrame()
 
-        # Filtrar datos
-        df_filtrado = df[
-            (pd.to_datetime(df['Fecha']).dt.year == rep_anio) & 
-            (pd.to_datetime(df['Fecha']).dt.month == rep_mes_num)
-        ]
+# --- INTERFAZ GRÁFICA ---
+st.title("☁️ Bitácora en la Nube")
+
+# Verificación de seguridad
+if "gcp_service_account" not in st.secrets:
+    st.warning("⚠️ Faltan los Secretos de configuración.")
+    st.info("Por favor configura 'gcp_service_account' en el panel de Streamlit Cloud.")
+    st.stop()
+
+tab_registro, tab_historial = st.tabs(["📝 Nuevo Registro", "📋 Ver Historial"])
+
+# --- PESTAÑA 1: REGISTRO ---
+with tab_registro:
+    st.markdown("### Ingresar Actividad")
+    
+    with st.form("form_nube", clear_on_submit=True):
+        fecha = st.date_input("Fecha", date.today())
+        hora = st.time_input("Hora", datetime.now().time())
+        actividad = st.text_area("Descripción de la labor")
+        foto = st.file_uploader("Evidencia Fotográfica", type=['jpg','png','jpeg'])
         
-        st.divider()
+        btn = st.form_submit_button("☁️ Guardar en Google Drive", type="primary", use_container_width=True)
         
-        if df_filtrado.empty:
-            st.warning(f"No hay actividades registradas en {rep_mes_nombre} de {rep_anio}.")
-        else:
-            st.success(f"Se encontraron {len(df_filtrado)} actividades en este periodo.")
+        if btn:
+            if not actividad:
+                st.error("⚠️ Falta la descripción.")
+            else:
+                with st.spinner("Subiendo foto y guardando datos..."):
+                    link_foto = "Sin evidencia"
+                    
+                    # Proceso de imagen (si existe)
+                    if foto:
+                        img_byte_arr = io.BytesIO()
+                        image = Image.open(foto)
+                        if image.mode in ("RGBA", "P"): image = image.convert("RGB")
+                        image.save(img_byte_arr, format='JPEG')
+                        img_byte_arr.seek(0)
+                        
+                        nombre_archivo = f"evidencia_{fecha}_{datetime.now().strftime('%H%M%S')}.jpg"
+                        link_result = guardar_en_drive(img_byte_arr, nombre_archivo)
+                        if link_result: link_foto = link_result
+
+                    # Guardar datos en Sheets
+                    if guardar_en_sheets(fecha, hora, actividad, link_foto):
+                        st.success("✅ ¡Registro exitoso! Guardado en la nube.")
+                        st.balloons()
+
+# --- PESTAÑA 2: HISTORIAL ---
+with tab_historial:
+    if st.button("🔄 Actualizar lista"):
+        st.rerun()
+        
+    df = leer_de_sheets()
+    
+    if not df.empty:
+        if 'Fecha' in df.columns:
+            df['Fecha'] = pd.to_datetime(df['Fecha']).dt.date
+            df = df.sort_values(by="Fecha", ascending=False)
             
-            # --- BOTÓN DE DESCARGA WORD ---
-            archivo_word = generar_word(df_filtrado, rep_mes_nombre, rep_anio)
-            
-            st.download_button(
-                label="📄 Descargar Reporte en Word (.docx)",
-                data=archivo_word,
-                file_name=f"Reporte_{rep_mes_nombre}_{rep_anio}.docx",
-                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                type="primary"
-            )
-            
-            st.markdown("---")
-            st.caption("Vista previa de los registros:")
-            st.dataframe(df_filtrado[["Fecha", "Hora", "Actividad"]], use_container_width=True)
+        st.dataframe(df, use_container_width=True)
+        
+        st.markdown("---")
+        st.caption("Últimos registros detallados:")
+        for i, row in df.head(5).iterrows():
+            with st.expander(f"{row.get('Fecha')} - {str(row.get('Actividad'))[:30]}..."):
+                st.write(f"**Detalle:** {row.get('Actividad')}")
+                ruta = row.get('RutaImagen', '')
+                if "http" in str(ruta):
+                    st.markdown(f"[📷 Ver foto en Drive]({ruta})")
+    else:
+        st.info("No hay registros en la hoja 'DB_BITACORA'.")
