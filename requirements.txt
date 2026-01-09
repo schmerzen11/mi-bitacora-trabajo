@@ -2,3 +2,6 @@ streamlit
 pandas
 Pillow
 python-docx
+gspread
+google-auth
+google-api-python-client
